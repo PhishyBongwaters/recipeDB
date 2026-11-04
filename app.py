@@ -7,11 +7,18 @@ never wipes recipes. On first start, when the recipes table is empty,
 the app seeds itself from data/seed.json.
 
 Routes:
-  GET /                     recipe list (HTML)
+  GET /                     recipe list (HTML), ?q= searches title,
+                            description and ingredients
+  GET /add                  add-recipe form (HTML)
+  POST /add                 save a new recipe, redirect to its page
   GET /recipes/<slug>       one recipe (HTML)
-  GET /api/recipes          all recipes (JSON)
+  GET /api/recipes          all recipes (JSON), ?q= filters the same way
   GET /api/recipes/<slug>   one recipe (JSON)
   GET /health               {"status": "ok"}
+
+Recipes added through the form go into the SQLite database (the
+volume), not into data/seed.json — seed.json only fills an empty
+database on first start.
 
 Environment:
   RECIPEDB_PATH  SQLite path, default /data/recipes.db
@@ -22,11 +29,12 @@ Environment:
 import html
 import json
 import os
+import re
 import sqlite3
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("RECIPEDB_PATH", "/data/recipes.db"))
@@ -159,11 +167,67 @@ def get_recipe(conn, slug):
     return recipe
 
 
-def list_recipes(conn):
-    rows = conn.execute(
-        "SELECT slug, title, total_time, serves FROM recipes ORDER BY title"
-    ).fetchall()
+def list_recipes(conn, q=None):
+    if q:
+        like = f"%{q}%"
+        rows = conn.execute(
+            """SELECT slug, title, total_time, serves FROM recipes
+               WHERE title LIKE ? OR description LIKE ?
+               OR EXISTS (SELECT 1 FROM ingredients
+                          WHERE ingredients.recipe_id = recipes.id
+                          AND ingredients.text LIKE ?)
+               ORDER BY title""",
+            (like, like, like),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT slug, title, total_time, serves FROM recipes ORDER BY title"
+        ).fetchall()
     return [dict(r) for r in rows]
+
+
+def slugify(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "recipe"
+
+
+def insert_recipe(conn, recipe, ingredients, steps):
+    cur = conn.execute(
+        """INSERT INTO recipes
+           (slug, title, description, source, submitted_by, prep_time,
+            cook_time, total_time, serves, oven_temperature, pan,
+            done_temperature, storage)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            recipe["slug"],
+            recipe["title"],
+            recipe.get("description", ""),
+            recipe.get("source", ""),
+            recipe.get("submitted_by", ""),
+            recipe.get("prep_time", ""),
+            recipe.get("cook_time", ""),
+            recipe.get("total_time", ""),
+            recipe.get("serves"),
+            recipe.get("oven_temperature", ""),
+            recipe.get("pan", ""),
+            recipe.get("done_temperature", ""),
+            recipe.get("storage", ""),
+        ),
+    )
+    recipe_id = cur.lastrowid
+    for i, text in enumerate(ingredients):
+        conn.execute(
+            "INSERT INTO ingredients (recipe_id, position, part, text)"
+            " VALUES (?, ?, ?, ?)",
+            (recipe_id, i, "", text),
+        )
+    for i, text in enumerate(steps):
+        conn.execute(
+            "INSERT INTO steps (recipe_id, position, text) VALUES (?, ?, ?)",
+            (recipe_id, i, text),
+        )
+    conn.commit()
+    return recipe_id
 
 
 def page(title, body):
@@ -171,10 +235,74 @@ def page(title, body):
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{html.escape(title)}</title>"
-        "<style>body{font-family:system-ui,sans-serif;max-width:720px;"
-        "margin:2rem auto;padding:0 1rem;line-height:1.5}</style>"
-        f"</head><body><h1>{html.escape(title)}</h1>{body}</body></html>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;max-width:760px;margin:0 auto;"
+        "padding:1rem;line-height:1.5;color:#222}"
+        "header{display:flex;justify-content:space-between;align-items:baseline;"
+        "flex-wrap:wrap;gap:.5rem;border-bottom:2px solid #222;padding-bottom:.5rem}"
+        "header a{color:#222;text-decoration:none;font-weight:600}"
+        "a{color:#0b5cad}"
+        ".card{border:1px solid #ddd;border-radius:10px;padding:1rem;margin:1rem 0}"
+        ".card h2{margin:0 0 .25rem}"
+        ".meta{color:#555;font-size:.9rem}"
+        ".chip{display:inline-block;background:#eef3f8;border-radius:20px;"
+        "padding:.15rem .6rem;margin:.15rem .25rem .15rem 0;font-size:.85rem}"
+        "form.search{display:flex;gap:.5rem;margin:1rem 0}"
+        "form.search input[type=search]{flex:1;padding:.6rem;font-size:1rem}"
+        "label{display:block;margin:.75rem 0 .25rem;font-weight:600}"
+        "input[type=text],input[type=url],input[type=number],textarea{"
+        "width:100%;box-sizing:border-box;padding:.6rem;font-size:1rem;"
+        "border:1px solid #bbb;border-radius:6px}"
+        "textarea{min-height:6rem}"
+        "button{padding:.6rem 1.2rem;font-size:1rem;border:0;border-radius:6px;"
+        "background:#222;color:#fff;cursor:pointer}"
+        ".error{background:#fdecea;border:1px solid #e57373;border-radius:6px;"
+        "padding:.75rem 1rem}"
+        "</style>"
+        f"</head><body><header><a href='/'>🍲 recipeDB</a>"
+        "<nav><a href='/add'>+ Add recipe</a></nav></header>"
+        f"<h1>{html.escape(title)}</h1>{body}</body></html>"
     ).encode("utf-8")
+
+
+ADD_FIELDS = [
+    ("title", "Title *", "text"),
+    ("slug", "Slug (optional — auto-generated from the title)", "text"),
+    ("description", "Description", "text"),
+    ("source", "Source URL", "url"),
+    ("submitted_by", "Submitted by", "text"),
+    ("prep_time", "Prep time", "text"),
+    ("cook_time", "Cook time", "text"),
+    ("total_time", "Total time", "text"),
+    ("serves", "Serves", "number"),
+    ("oven_temperature", "Oven temperature", "text"),
+    ("pan", "Pan", "text"),
+    ("done_temperature", "Done temperature", "text"),
+    ("storage", "Storage notes", "text"),
+]
+
+
+def add_form(values=None, error=None):
+    values = values or {}
+    parts = []
+    if error:
+        parts.append(f"<p class='error'>{html.escape(error)}</p>")
+    parts.append("<form method='post' action='/add'>")
+    for name, label, kind in ADD_FIELDS:
+        parts.append(
+            f"<label for='{name}'>{html.escape(label)}</label>"
+            f"<input type='{kind}' id='{name}' name='{name}'"
+            f" value='{html.escape(values.get(name, ''), quote=True)}'>"
+        )
+    parts.append(
+        "<label for='ingredients'>Ingredients * — one per line</label>"
+        f"<textarea id='ingredients' name='ingredients'>{html.escape(values.get('ingredients', ''))}</textarea>"
+        "<label for='steps'>Steps * — one per line</label>"
+        f"<textarea id='steps' name='steps'>{html.escape(values.get('steps', ''))}</textarea>"
+        "<p><button type='submit'>Save recipe</button></p>"
+        "</form>"
+    )
+    return "".join(parts)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -197,26 +325,46 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        q = (query.get("q", [""])[0] or "").strip()
         conn = connect()
         try:
             if path == "/health":
                 self.send_json({"status": "ok"})
+            elif path == "/add":
+                self.send_html(page("Add recipe", add_form()))
             elif path == "/":
-                recipes = list_recipes(conn)
-                items = "".join(
-                    f"<li><a href='/recipes/{html.escape(r['slug'])}'>"
-                    f"{html.escape(r['title'])}</a>"
-                    f" — {html.escape(r['total_time'] or '')}"
-                    f", serves {r['serves']}</li>"
+                recipes = list_recipes(conn, q or None)
+                search = (
+                    f"<form class='search' method='get' action='/'>"
+                    f"<input type='search' name='q' placeholder='Search recipes…'"
+                    f" value='{html.escape(q, quote=True)}'>"
+                    "<button type='submit'>Search</button></form>"
+                )
+                if q:
+                    search += (
+                        f"<p>Results for “{html.escape(q)}” — "
+                        f"<a href='/'>clear search</a></p>"
+                    )
+                cards = "".join(
+                    f"<div class='card'><h2><a href='/recipes/{html.escape(r['slug'])}'>"
+                    f"{html.escape(r['title'])}</a></h2>"
+                    f"<p class='meta'>{html.escape(r['total_time'] or '')}"
+                    f" · serves {r['serves']}</p></div>"
                     for r in recipes
                 )
                 self.send_html(
-                    page("Recipes", f"<ul>{items}</ul>" if items else "<p>No recipes yet.</p>")
+                    page(
+                        "Recipes",
+                        search + (cards if cards else "<p>No recipes found.</p>"),
+                    )
                 )
             elif path == "/api/recipes":
                 recipes = [
-                    get_recipe(conn, r["slug"]) for r in list_recipes(conn)
+                    get_recipe(conn, r["slug"])
+                    for r in list_recipes(conn, q or None)
                 ]
                 self.send_json(recipes)
             elif path.startswith("/api/recipes/"):
@@ -237,19 +385,36 @@ class Handler(BaseHTTPRequestHandler):
                     steps = "".join(
                         f"<li>{html.escape(s)}</li>" for s in recipe["steps"]
                     )
+                    chips = "".join(
+                        f"<span class='chip'>{html.escape(v)}</span>"
+                        for v in [
+                            f"Prep {recipe['prep_time']}" if recipe["prep_time"] else "",
+                            f"Cook {recipe['cook_time']}" if recipe["cook_time"] else "",
+                            f"Total {recipe['total_time']}" if recipe["total_time"] else "",
+                            f"Serves {recipe['serves']}" if recipe["serves"] else "",
+                            f"Oven {recipe['oven_temperature']}" if recipe["oven_temperature"] else "",
+                            f"Pan {recipe['pan']}" if recipe["pan"] else "",
+                            f"Done at {recipe['done_temperature']}" if recipe["done_temperature"] else "",
+                        ]
+                        if v
+                    )
+                    storage = (
+                        f"<h2>Storage</h2><p>{html.escape(recipe['storage'])}</p>"
+                        if recipe["storage"]
+                        else ""
+                    )
+                    source = (
+                        f"<p>Source: <a href='{html.escape(recipe['source'], quote=True)}'>"
+                        f"{html.escape(recipe['source'])}</a></p>"
+                        if recipe["source"]
+                        else ""
+                    )
                     body = (
                         f"<p>{html.escape(recipe['description'])}</p>"
-                        f"<p>Prep {html.escape(recipe['prep_time'])} · "
-                        f"Cook {html.escape(recipe['cook_time'])} · "
-                        f"Total {html.escape(recipe['total_time'])} · "
-                        f"Serves {recipe['serves']}</p>"
-                        f"<p>Oven {html.escape(recipe['oven_temperature'])} · "
-                        f"Pan {html.escape(recipe['pan'])}</p>"
-                        f"<p>Done at {html.escape(recipe['done_temperature'])}</p>"
+                        f"<p>{chips}</p>"
                         f"<h2>Ingredients</h2><ul>{ingredients}</ul>"
                         f"<h2>Steps</h2><ol>{steps}</ol>"
-                        f"<p>Source: <a href='{html.escape(recipe['source'])}'>"
-                        f"{html.escape(recipe['source'])}</a></p>"
+                        f"{storage}{source}"
                         f"<p><a href='/'>← All recipes</a></p>"
                     )
                     self.send_html(page(recipe["title"], body))
@@ -257,6 +422,85 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(page("Not found", "<p>No such page.</p>"), 404)
         finally:
             conn.close()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path != "/add":
+            self.send_html(page("Not found", "<p>No such page.</p>"), 404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 200_000:
+            self.send_html(
+                page("Add recipe", add_form(error="Form was empty or too large.")),
+                400,
+            )
+            return
+        raw = self.rfile.read(length).decode("utf-8", "replace")
+        fields = {k: v[0] for k, v in parse_qs(raw).items()}
+        values = {name: fields.get(name, "") for name, _, _ in ADD_FIELDS}
+        values["ingredients"] = fields.get("ingredients", "")
+        values["steps"] = fields.get("steps", "")
+        title = values["title"].strip()
+        ingredients = [l.strip() for l in values["ingredients"].splitlines() if l.strip()]
+        steps = [l.strip() for l in values["steps"].splitlines() if l.strip()]
+        slug = slugify(values["slug"] or title)
+        serves = None
+        if values["serves"].strip():
+            try:
+                serves = int(values["serves"])
+            except ValueError:
+                serves = None
+                self.send_html(
+                    page("Add recipe", add_form(values, "Serves must be a whole number.")),
+                    400,
+                )
+                return
+        if not title or not ingredients or not steps:
+            self.send_html(
+                page(
+                    "Add recipe",
+                    add_form(values, "Title, at least one ingredient, and at least one step are required."),
+                ),
+                400,
+            )
+            return
+        recipe = {
+            "slug": slug,
+            "title": title,
+            "description": values["description"].strip(),
+            "source": values["source"].strip(),
+            "submitted_by": values["submitted_by"].strip(),
+            "prep_time": values["prep_time"].strip(),
+            "cook_time": values["cook_time"].strip(),
+            "total_time": values["total_time"].strip(),
+            "serves": serves,
+            "oven_temperature": values["oven_temperature"].strip(),
+            "pan": values["pan"].strip(),
+            "done_temperature": values["done_temperature"].strip(),
+            "storage": values["storage"].strip(),
+        }
+        conn = connect()
+        try:
+            try:
+                insert_recipe(conn, recipe, ingredients, steps)
+            except sqlite3.IntegrityError:
+                self.send_html(
+                    page(
+                        "Add recipe",
+                        add_form(values, f"A recipe with slug “{slug}” already exists — pick a different slug."),
+                    ),
+                    400,
+                )
+                return
+        finally:
+            conn.close()
+        self.send_response(303)
+        self.send_header("Location", f"/recipes/{slug}")
+        self.end_headers()
 
 
 def main():

@@ -14,11 +14,21 @@ docker compose up --build
 
 Then open http://localhost:8080
 
-- `/` — recipe list
+- `/` — recipe list, with a search box (searches title, description
+  and ingredients; also `/?q=beef`)
+- `/add` — add-recipe form: title, times, serves, oven/pan,
+  ingredients (one per line) and steps (one per line). The slug is
+  auto-generated from the title unless you enter one. Saving
+  redirects to the new recipe's page.
 - `/recipes/easy-meatloaf` — one recipe
-- `/api/recipes` — all recipes as JSON
+- `/api/recipes` — all recipes as JSON (also accepts `?q=`)
 - `/api/recipes/easy-meatloaf` — one recipe as JSON
 - `/health` — health check
+
+Recipes added through the form are saved in the SQLite volume, not
+in `data/seed.json` — so they survive restarts and rebuilds, but
+they are not committed to the repo. To share a recipe, add it to
+`data/seed.json` as well (or export it from `/api/recipes/<slug>`).
 
 ## Seeding
 
