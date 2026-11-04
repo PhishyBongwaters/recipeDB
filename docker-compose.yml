@@ -1,0 +1,17 @@
+services:
+  recipedb:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      # Named volume: the SQLite database lives here, outside the repo
+      # and outside the image, so rebuilds and restarts keep your recipes.
+      - recipedb-data:/data
+    environment:
+      - PORT=8080
+      - RECIPEDB_PATH=/data/recipes.db
+      - RECIPEDB_SEED=/app/data/seed.json
+    restart: unless-stopped
+
+volumes:
+  recipedb-data:
