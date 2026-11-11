@@ -40,16 +40,20 @@ all recipes, so only do it on purpose.
 
 ## Adding recipes
 
-Add an entry to `data/seed.json` before first run, or add it to a
-fresh database the same way. (A write UI / API is a later step, not
-in this first version.)
+Use the `/add` form in the running app, or add an entry to
+`data/seed.json` before first run. Form-added recipes live in the
+volume only; seed entries are the ones shared in the repo.
 
-## First recipe
+## Recipes in the seed
 
-Easy Meatloaf, from Allrecipes:
-https://www.allrecipes.com/recipe/16354/easy-meatloaf/
-
-Prep 15 mins, cook 1 hr, serves 8, done at 160°F in the middle.
+- Easy Meatloaf, from Allrecipes:
+  https://www.allrecipes.com/recipe/16354/easy-meatloaf/
+  Prep 15 mins, cook 1 hr, serves 8, done at 160°F in the middle.
+- New York Style Bagel, from Urban Farm and Kitchen:
+  https://urbanfarmandkitchen.com/new-york-style-bagel-recipe/
+  Bake 20-25 mins at 425°F, makes 6 large or 9 small bagels.
+  Note: the page gives no prep/total time or single serving count,
+  so those fields are left blank in the seed rather than guessed.
 
 ## Layout
 
