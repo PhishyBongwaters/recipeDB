@@ -14,6 +14,9 @@ docker compose up --build
 
 Then open http://localhost:8080
 
+The UI is dark by default, with a Light/Dark toggle in the header.
+Your choice is remembered in the browser (localStorage).
+
 - `/` — recipe list, with a search box (searches title, description
   and ingredients; also `/?q=beef`)
 - `/add` — add-recipe form: title, times, serves, oven/pan,
