@@ -17,6 +17,17 @@ Then open http://localhost:8080
 The UI is dark by default, with a Light/Dark toggle in the header.
 Your choice is remembered in the browser (localStorage).
 
+Each recipe page is a board of section cards — Recipe, Ingredients,
+Steps, Details. Drag a card by its header to move it, drag its
+bottom-right corner to resize it. The layout is saved per recipe in
+the browser (localStorage), and the Reset layout button restores the
+default arrangement.
+
+Tap any measurement in the ingredients to convert it (cups ↔ tbsp ↔
+tsp ↔ ml ↔ fl oz ↔ L, pounds ↔ oz ↔ g ↔ kg); hover over it to see
+all equivalents. The "Show metric" button converts every ingredient
+on the page at once, and "Show US units" switches them back.
+
 - `/` — recipe list, with a search box (searches title, description
   and ingredients; also `/?q=beef`)
 - `/add` — add-recipe form: title, times, serves, oven/pan,

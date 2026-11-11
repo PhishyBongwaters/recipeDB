@@ -16,7 +16,13 @@ Routes:
                             description and ingredients
   GET /add                  add-recipe form (HTML)
   POST /add                 save a new recipe, redirect to its page
-  GET /recipes/<slug>       one recipe (HTML)
+  GET /recipes/<slug>       one recipe (HTML) — a board of draggable,
+                            resizable section cards (Recipe, Ingredients,
+                            Steps, Details); layout is saved per recipe
+                            in the browser, with a Reset layout button.
+                            Tap a measurement to convert it (cup/tbsp/
+                            tsp/ml/fl oz/L, lb/oz/g/kg); hover shows all
+                            equivalents. "Show metric" converts them all.
   GET /api/recipes          all recipes (JSON), ?q= filters the same way
   GET /api/recipes/<slug>   one recipe (JSON)
   GET /health               {"status": "ok"}
@@ -243,6 +249,227 @@ def insert_recipe(conn, recipe, ingredients, steps):
     return recipe_id
 
 
+# --- Measurement conversion (issue #2) ---
+# Parses the leading quantity + unit of an ingredient line so the UI
+# can convert it (tap to cycle units, hover for all equivalents).
+
+UNICODE_FRACTIONS = {
+    "½": (1, 2), "⅓": (1, 3), "⅔": (2, 3), "¼": (1, 4), "¾": (3, 4),
+    "⅛": (1, 8), "⅜": (3, 8), "⅝": (5, 8), "⅞": (7, 8),
+    "⅕": (1, 5), "⅖": (2, 5), "⅗": (3, 5), "⅘": (4, 5),
+    "⅙": (1, 6), "⅚": (5, 6), "⅐": (1, 7), "⅑": (1, 9), "⅒": (1, 10),
+}
+FRACTION_CHARS = {
+    (1, 2): "½", (1, 3): "⅓", (2, 3): "⅔", (1, 4): "¼", (3, 4): "¾",
+    (1, 8): "⅛", (3, 8): "⅜", (5, 8): "⅝", (7, 8): "⅞",
+}
+# alias -> (family, canonical unit, factor to base unit: ml for volume, g for weight)
+UNITS = {}
+for _alias, _fam, _canon, _factor in [
+    ("tsp", "volume", "tsp", 4.92892159375),
+    ("teaspoon", "volume", "tsp", 4.92892159375),
+    ("teaspoons", "volume", "tsp", 4.92892159375),
+    ("tbsp", "volume", "tbsp", 14.78676478125),
+    ("tablespoon", "volume", "tbsp", 14.78676478125),
+    ("tablespoons", "volume", "tbsp", 14.78676478125),
+    ("cup", "volume", "cup", 236.5882365),
+    ("cups", "volume", "cup", 236.5882365),
+    ("fl oz", "volume", "fl oz", 29.5735295625),
+    ("fluid ounce", "volume", "fl oz", 29.5735295625),
+    ("fluid ounces", "volume", "fl oz", 29.5735295625),
+    ("pint", "volume", "pint", 473.176473),
+    ("pints", "volume", "pint", 473.176473),
+    ("quart", "volume", "quart", 946.352946),
+    ("quarts", "volume", "quart", 946.352946),
+    ("l", "volume", "L", 1000.0),
+    ("L", "volume", "L", 1000.0),
+    ("liter", "volume", "L", 1000.0),
+    ("liters", "volume", "L", 1000.0),
+    ("litre", "volume", "L", 1000.0),
+    ("litres", "volume", "L", 1000.0),
+    ("ml", "volume", "ml", 1.0),
+    ("milliliter", "volume", "ml", 1.0),
+    ("milliliters", "volume", "ml", 1.0),
+    ("millilitre", "volume", "ml", 1.0),
+    ("millilitres", "volume", "ml", 1.0),
+    ("gal", "volume", "gal", 3785.411784),
+    ("gallon", "volume", "gal", 3785.411784),
+    ("gallons", "volume", "gal", 3785.411784),
+    ("g", "weight", "g", 1.0),
+    ("gram", "weight", "g", 1.0),
+    ("grams", "weight", "g", 1.0),
+    ("kg", "weight", "kg", 1000.0),
+    ("kilogram", "weight", "kg", 1000.0),
+    ("kilograms", "weight", "kg", 1000.0),
+    ("oz", "weight", "oz", 28.349523125),
+    ("ounce", "weight", "oz", 28.349523125),
+    ("ounces", "weight", "oz", 28.349523125),
+    ("lb", "weight", "lb", 453.59237),
+    ("lbs", "weight", "lb", 453.59237),
+    ("pound", "weight", "lb", 453.59237),
+    ("pounds", "weight", "lb", 453.59237),
+]:
+    UNITS[_alias] = (_fam, _canon, _factor)
+
+CYCLE_UNITS = {
+    "volume": ["cup", "tbsp", "tsp", "ml", "fl oz", "L"],
+    "weight": ["lb", "oz", "g", "kg"],
+}
+
+
+def unit_display(unit, amount):
+    if unit == "cup":
+        return "cup" if amount == 1 else "cups"
+    if unit == "pint":
+        return "pint" if amount == 1 else "pints"
+    if unit == "quart":
+        return "quart" if amount == 1 else "quarts"
+    return unit
+
+
+def fmt_amount(x, unit):
+    """Format an amount: fractions for US units, rounded for metric."""
+    if unit in ("ml", "g"):
+        if x >= 100:
+            return str(int(round(x)))
+        r = round(x, 1)
+        return str(int(r)) if r == int(r) else f"{r:.1f}"
+    if unit in ("kg", "L"):
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+    from fractions import Fraction
+
+    frac = Fraction(x).limit_denominator(8)
+    if abs(float(frac) - x) > 0.02:
+        # No close fraction (e.g. 0.08 gal) — a decimal is more honest.
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+    whole = frac.numerator // frac.denominator
+    rem = frac - whole
+    if rem == 0:
+        return str(whole)
+    fchar = FRACTION_CHARS.get((rem.numerator, rem.denominator))
+    if fchar is None:
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+    return f"{whole}{fchar}" if whole else fchar
+
+
+def convert_amount(amount, from_unit, to_unit):
+    _fam, _canon, f1 = UNITS[from_unit]
+    _fam2, _canon2, f2 = UNITS[to_unit]
+    return amount * f1 / f2
+
+
+def _parse_number(s):
+    """Parse a leading number (mixed, fraction, unicode, decimal).
+
+    Returns (value, chars_consumed) or None.
+    """
+    m = re.match(r"^(\d+)\s+(\d+)/(\d+)", s)
+    if m:
+        return int(m.group(1)) + int(m.group(2)) / int(m.group(3)), m.end()
+    m = re.match(r"^(\d+)/(\d+)", s)
+    if m:
+        return int(m.group(1)) / int(m.group(2)), m.end()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚⅐⅑⅒])", s)
+    if m:
+        num, den = UNICODE_FRACTIONS[m.group(2)]
+        return float(m.group(1)) + num / den, m.end()
+    m = re.match(r"^([½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚⅐⅑⅒])", s)
+    if m:
+        num, den = UNICODE_FRACTIONS[m.group(1)]
+        return num / den, m.end()
+    m = re.match(r"^(\d+(?:\.\d+)?)", s)
+    if m:
+        return float(m.group(1)), m.end()
+    return None
+
+
+def _match_unit(rest):
+    """Match a leading unit in rest. Returns (family, canon, rest) or None."""
+    low = rest.lower()
+    for alias in sorted(UNITS, key=len, reverse=True):
+        if low == alias or low.startswith(alias + " "):
+            fam, canon, _factor = UNITS[alias]
+            return fam, canon, rest[len(alias):].strip()
+    return None
+
+
+def parse_measure(text):
+    """Parse the leading measurement of an ingredient line.
+
+    Returns {"amount"|"low"/"high", "unit", "family", "rest"} or None
+    when the line starts with no convertible measurement.
+    """
+    s = text.strip()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[–-]\s*(\d+(?:\.\d+)?)\s+(.*)$", s)
+    if m:
+        unit = _match_unit(m.group(3))
+        if unit:
+            fam, canon, rest = unit
+            return {
+                "low": float(m.group(1)),
+                "high": float(m.group(2)),
+                "unit": canon,
+                "family": fam,
+                "rest": rest,
+            }
+        return None
+    num = _parse_number(s)
+    if not num:
+        return None
+    value, idx = num
+    unit = _match_unit(s[idx:].strip())
+    if not unit:
+        return None
+    fam, canon, rest = unit
+    return {"amount": value, "unit": canon, "family": fam, "rest": rest}
+
+
+def conversions_tooltip(m):
+    """'1⅓ cups = 21⅓ tbsp · 64 tsp · 315 ml · …' for the title tooltip.
+
+    Only the units the click-cycle offers, and never a unit the amount
+    rounds to zero in (no '0 quarts' for 2 tsp).
+    """
+    parts = []
+    for unit in CYCLE_UNITS[m["family"]]:
+        if unit == m["unit"]:
+            continue
+        if "amount" in m:
+            v = convert_amount(m["amount"], m["unit"], unit)
+            if v < 0.005:
+                continue
+            parts.append(f"{fmt_amount(v, unit)} {unit_display(unit, v)}")
+        else:
+            lo = convert_amount(m["low"], m["unit"], unit)
+            hi = convert_amount(m["high"], m["unit"], unit)
+            if hi < 0.005:
+                continue
+            parts.append(
+                f"{fmt_amount(lo, unit)}–{fmt_amount(hi, unit)} "
+                f"{unit_display(unit, hi)}"
+            )
+    return " = ".join(parts)
+
+
+def ingredient_li(text):
+    """Render one ingredient line, with a tap-to-convert button when
+    it starts with a convertible measurement."""
+    m = parse_measure(text)
+    if not m:
+        return f"<li>{html.escape(text)}</li>"
+    if "amount" in m:
+        data = f" data-base-amount='{m['amount']}'"
+    else:
+        data = f" data-base-low='{m['low']}' data-base-high='{m['high']}'"
+    title = html.escape(conversions_tooltip(m), quote=True)
+    return (
+        f"<li><button type='button' class='conv' data-base-unit='{m['unit']}'"
+        f" data-family='{m['family']}'{data}"
+        f" data-rest='{html.escape(m['rest'], quote=True)}'"
+        f" title='Click to convert · {title}'>{html.escape(text)}</button></li>"
+    )
+
+
 def page(title, body):
     # Dark is the default theme; the toggle stores a light/dark choice
     # in localStorage, applied in <head> so there is no light flash.
@@ -295,6 +522,30 @@ def page(title, body):
         "border:1px solid var(--border)}"
         ".error{background:var(--error-bg);border:1px solid var(--error-border);"
         "border-radius:6px;padding:.75rem 1rem}"
+        ".board{position:relative}"
+        ".board-tools{display:flex;justify-content:flex-end;margin-bottom:.5rem}"
+        ".node{position:relative;background:var(--surface);"
+        "border:1px solid var(--border);border-radius:12px;margin:0 0 1rem;"
+        "box-shadow:0 2px 10px rgba(0,0,0,.25)}"
+        ".board.laid-out .node{position:absolute;margin:0;max-width:100%}"
+        ".node-head{display:flex;align-items:center;gap:.5rem;"
+        "padding:.5rem .75rem;border-bottom:1px solid var(--border);"
+        "cursor:grab;user-select:none;touch-action:none;font-weight:600}"
+        ".node-head:active{cursor:grabbing}"
+        ".node-head .theme-toggle{margin-left:auto}"
+        ".grip{opacity:.55}"
+        ".node-body{padding:.75rem 1rem}"
+        ".node-body h2,.node-body h3{margin:.5rem 0 .25rem}"
+        ".node-body ul,.node-body ol{margin:.25rem 0;padding-left:1.25rem}"
+        ".resize-handle{position:absolute;right:5px;bottom:5px;width:16px;"
+        "height:16px;cursor:nwse-resize;touch-action:none;opacity:.55;"
+        "background:linear-gradient(135deg,transparent 50%,var(--muted) 50%,"
+        "var(--muted) 62%,transparent 62%,transparent 72%,var(--muted) 72%,"
+        "var(--muted) 84%,transparent 84%)}"
+        "button.conv{background:none;border:0;padding:0;font:inherit;"
+        "color:inherit;text-align:left;cursor:pointer;"
+        "text-decoration:underline dotted}"
+        "button.conv:hover{color:var(--link)}"
         "</style>"
         f"</head><body><header><a href='/'>🍲 recipeDB</a>"
         "<nav><a href='/add'>+ Add recipe</a>"
@@ -309,6 +560,126 @@ def page(title, body):
         "document.documentElement.getAttribute('data-theme')==='dark'"
         "?'light':'dark';document.documentElement.setAttribute('data-theme',next);"
         "try{localStorage.setItem('recipedb-theme',next);}catch(e){}label();});"
+        "})();</script>"
+        "<script>(function(){"
+        "var CONV={volume:{tsp:4.92892159375,tbsp:14.78676478125,"
+        "cup:236.5882365,'fl oz':29.5735295625,pint:473.176473,"
+        "quart:946.352946,L:1000,ml:1,gal:3785.411784},"
+        "weight:{g:1,kg:1000,oz:28.349523125,lb:453.59237}};"
+        "var CYCLE={volume:['cup','tbsp','tsp','ml','fl oz','L'],"
+        "weight:['lb','oz','g','kg']};"
+        "var FRAC={'1/2':'½','1/3':'⅓','2/3':'⅔','1/4':'¼','3/4':'¾',"
+        "'1/8':'⅛','3/8':'⅜','5/8':'⅝','7/8':'⅞'};"
+        "function fmt(x,unit){"
+        "if(unit==='ml'||unit==='g'){"
+        "if(x>=100){return String(Math.round(x));}"
+        "var r=Math.round(x*10)/10; return (r%1===0)?String(r):r.toFixed(1);}"
+        "if(unit==='kg'||unit==='L'){"
+        "return x.toFixed(2).replace(/0+$/,'').replace(/\\.$/,'');}"
+        "var whole=Math.floor(x+1e-9), frac=x-whole, best=[0,1], bestErr=1;"
+        "[2,3,4,8].forEach(function(d){var n=Math.round(frac*d);"
+        "var e=Math.abs(frac-n/d); if(e<bestErr){bestErr=e; best=[n,d];}});"
+        "if(bestErr<0.03&&best[0]>0){"
+        "var ch=FRAC[best[0]+'/'+best[1]];"
+        "if(ch){return whole?whole+ch:ch;}}"
+        "if(bestErr<0.03&&best[0]===0){return String(whole);}"
+        "return x.toFixed(2).replace(/0+$/,'').replace(/\\.$/,'');}"
+        "function disp(unit,x){"
+        "if(unit==='cup'){return x===1?'cup':'cups';}"
+        "if(unit==='pint'){return x===1?'pint':'pints';}"
+        "if(unit==='quart'){return x===1?'quart':'quarts';}"
+        "return unit;}"
+        "function convert(b,unit){"
+        "var fam=b.getAttribute('data-family');"
+        "var base=b.getAttribute('data-base-unit');"
+        "var rest=b.getAttribute('data-rest');"
+        "function amt(v){return v*CONV[fam][base]/CONV[fam][unit];}"
+        "var txt;"
+        "if(b.hasAttribute('data-base-amount')){"
+        "var v=amt(parseFloat(b.getAttribute('data-base-amount')));"
+        "txt=fmt(v,unit)+' '+disp(unit,v)+' '+rest;"
+        "}else{"
+        "var lo=amt(parseFloat(b.getAttribute('data-base-low')));"
+        "var hi=amt(parseFloat(b.getAttribute('data-base-high')));"
+        "txt=fmt(lo,unit)+'–'+fmt(hi,unit)+' '+disp(unit,hi)+' '+rest;}"
+        "b.setAttribute('data-unit',unit); b.textContent=txt;}"
+        "document.querySelectorAll('.conv').forEach(function(b){"
+        "b.setAttribute('data-unit',b.getAttribute('data-base-unit'));"
+        "b.addEventListener('click',function(){"
+        "var cycle=CYCLE[b.getAttribute('data-family')];"
+        "var idx=cycle.indexOf(b.getAttribute('data-unit'));"
+        "convert(b,cycle[(idx+1)%cycle.length]);});});"
+        "var metricBtn=document.getElementById('units-metric');"
+        "if(metricBtn){metricBtn.addEventListener('click',function(){"
+        "var toMetric=metricBtn.getAttribute('data-mode')!=='metric';"
+        "document.querySelectorAll('.conv').forEach(function(b){"
+        "var fam=b.getAttribute('data-family');"
+        "convert(b,toMetric?(fam==='volume'?'ml':'g')"
+        ":b.getAttribute('data-base-unit'));});"
+        "metricBtn.setAttribute('data-mode',toMetric?'metric':'us');"
+        "metricBtn.textContent=toMetric?'Show US units':'Show metric';});}"
+        "var board=document.getElementById('board');"
+        "if(!board){return;}"
+        "var slug=board.getAttribute('data-slug');"
+        "var key='recipedb-layout-'+slug;"
+        "var nodes=Array.prototype.slice.call(board.querySelectorAll('.node'));"
+        "var saved=null;"
+        "try{saved=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}"
+        "function boardHeight(){var h=0;"
+        "nodes.forEach(function(n){h=Math.max(h,n.offsetTop+n.offsetHeight);});"
+        "board.style.height=h+'px';}"
+        "function save(){var out={};"
+        "nodes.forEach(function(n){var o={left:n.style.left,top:n.style.top,"
+        "width:n.style.width};"
+        "if(n.style.height){o.height=n.style.height;}"
+        "out[n.getAttribute('data-card')]=o;});"
+        "try{localStorage.setItem(key,JSON.stringify(out));}catch(e){}}"
+        "if(saved){"
+        "nodes.forEach(function(n){var o=saved[n.getAttribute('data-card')];"
+        "if(!o){return;}"
+        "n.style.left=o.left; n.style.top=o.top; n.style.width=o.width;"
+        "if(o.height){n.style.height=o.height; n.style.overflow='auto';}});"
+        "board.classList.add('laid-out');"
+        "requestAnimationFrame(boardHeight);"
+        "}else{"
+        "var br=board.getBoundingClientRect();"
+        "nodes.forEach(function(n){var r=n.getBoundingClientRect();"
+        "n.style.left=(r.left-br.left)+'px';"
+        "n.style.top=(r.top-br.top)+'px';"
+        "n.style.width=r.width+'px';});"
+        "board.classList.add('laid-out'); boardHeight();}"
+        "nodes.forEach(function(n){"
+        "var head=n.querySelector('.node-head');"
+        "head.addEventListener('pointerdown',function(e){"
+        "if(e.target.closest('button')){return;}"
+        "e.preventDefault();"
+        "var sx=e.clientX, sy=e.clientY, sl=n.offsetLeft, st=n.offsetTop;"
+        "head.setPointerCapture(e.pointerId);"
+        "function move(ev){"
+        "n.style.left=(sl+ev.clientX-sx)+'px';"
+        "n.style.top=Math.max(0,st+ev.clientY-sy)+'px'; boardHeight();}"
+        "function up(){"
+        "head.removeEventListener('pointermove',move);"
+        "head.removeEventListener('pointerup',up); save();}"
+        "head.addEventListener('pointermove',move);"
+        "head.addEventListener('pointerup',up);});"
+        "var h=n.querySelector('.resize-handle');"
+        "h.addEventListener('pointerdown',function(e){"
+        "e.preventDefault(); e.stopPropagation();"
+        "var sx=e.clientX, sy=e.clientY, sw=n.offsetWidth, sh=n.offsetHeight;"
+        "h.setPointerCapture(e.pointerId);"
+        "function move(ev){"
+        "n.style.width=Math.max(240,sw+ev.clientX-sx)+'px';"
+        "n.style.height=Math.max(80,sh+ev.clientY-sy)+'px';"
+        "n.style.overflow='auto'; boardHeight();}"
+        "function up(){"
+        "h.removeEventListener('pointermove',move);"
+        "h.removeEventListener('pointerup',up); save();}"
+        "h.addEventListener('pointermove',move);"
+        "h.addEventListener('pointerup',up);});});"
+        "var reset=document.getElementById('layout-reset');"
+        "if(reset){reset.addEventListener('click',function(){"
+        "try{localStorage.removeItem(key);}catch(e){} location.reload();});}"
         "})();</script>"
         "</body></html>"
     ).encode("utf-8")
@@ -427,9 +798,20 @@ class Handler(BaseHTTPRequestHandler):
                 if recipe is None:
                     self.send_html(page("Not found", "<p>No such recipe.</p>"), 404)
                 else:
+                    # Ingredients grouped by part (dough / bath / toppings…),
+                    # each line convertible when it starts with a measurement.
+                    ing_groups = []
+                    for i in recipe["ingredients"]:
+                        part = i.get("part", "")
+                        if not ing_groups or ing_groups[-1][0] != part:
+                            ing_groups.append((part, []))
+                        ing_groups[-1][1].append(i["text"])
                     ingredients = "".join(
-                        f"<li>{html.escape(i['text'])}</li>"
-                        for i in recipe["ingredients"]
+                        (f"<h3>{html.escape(part)}</h3>" if part else "")
+                        + "<ul class='ingredients'>"
+                        + "".join(ingredient_li(t) for t in texts)
+                        + "</ul>"
+                        for part, texts in ing_groups
                     )
                     steps = "".join(
                         f"<li>{html.escape(s)}</li>" for s in recipe["steps"]
@@ -458,12 +840,48 @@ class Handler(BaseHTTPRequestHandler):
                         if recipe["source"]
                         else ""
                     )
+                    # Board of draggable, resizable section cards
+                    # (issue #1, darkBoard-style nodes).
+                    details = storage + source
+                    details_node = (
+                        "<div class='node' data-card='details'>"
+                        "<div class='node-head'><span class='grip'>⠿</span>"
+                        "Details</div>"
+                        f"<div class='node-body'>{details}</div>"
+                        "<div class='resize-handle'></div></div>"
+                        if details
+                        else ""
+                    )
                     body = (
-                        f"<p>{html.escape(recipe['description'])}</p>"
-                        f"<p>{chips}</p>"
-                        f"<h2>Ingredients</h2><ul>{ingredients}</ul>"
-                        f"<h2>Steps</h2><ol>{steps}</ol>"
-                        f"{storage}{source}"
+                        "<div class='board-tools'>"
+                        "<button type='button' id='layout-reset'"
+                        " class='theme-toggle'>Reset layout</button></div>"
+                        f"<div class='board' id='board' data-slug='"
+                        f"{html.escape(recipe['slug'], quote=True)}'>"
+                        "<div class='node' data-card='recipe'>"
+                        "<div class='node-head'><span class='grip'>⠿</span>"
+                        "Recipe</div>"
+                        f"<div class='node-body'><p>"
+                        f"{html.escape(recipe['description'])}</p>"
+                        f"<p>{chips}</p></div>"
+                        "<div class='resize-handle'></div></div>"
+                        "<div class='node' data-card='ingredients'>"
+                        "<div class='node-head'><span class='grip'>⠿</span>"
+                        "Ingredients"
+                        "<button type='button' id='units-metric'"
+                        " class='theme-toggle' data-mode='us'>"
+                        "Show metric</button></div>"
+                        f"<div class='node-body'>{ingredients}"
+                        "<p class='meta'>Tap a measurement to convert it,"
+                        " or hover for all equivalents.</p></div>"
+                        "<div class='resize-handle'></div></div>"
+                        "<div class='node' data-card='steps'>"
+                        "<div class='node-head'><span class='grip'>⠿</span>"
+                        "Steps</div>"
+                        f"<div class='node-body'><ol>{steps}</ol></div>"
+                        "<div class='resize-handle'></div></div>"
+                        f"{details_node}"
+                        "</div>"
                         f"<p><a href='/'>← All recipes</a></p>"
                     )
                     self.send_html(page(recipe["title"], body))
