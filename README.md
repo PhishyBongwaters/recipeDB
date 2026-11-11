@@ -35,11 +35,17 @@ they are not committed to the repo. To share a recipe, add it to
 
 ## Seeding
 
-On first start, when the recipes table is empty, the app seeds itself
-from `data/seed.json`. Seeding never overwrites recipes already in the
-database. To reseed from scratch, stop the container and drop the
-volume (`docker compose down -v`), then start again — that deletes
-all recipes, so only do it on purpose.
+On every start, the app inserts any recipe from `data/seed.json`
+whose slug is not already in the database. So a new seed recipe
+reaches an existing database on the next restart — no fresh volume
+needed. Seeding never overwrites or duplicates existing recipes.
+To reseed from scratch, stop the container and drop the volume
+(`docker compose down -v`), then start again — that deletes all
+recipes, so only do it on purpose.
+
+Where the seed lives: in the repo it is `data/seed.json`; in the
+container it is copied to `/app/data/seed.json`. `/data` itself
+holds only the SQLite database (`recipes.db`), not the seed file.
 
 ## Adding recipes
 

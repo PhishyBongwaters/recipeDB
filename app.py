@@ -3,8 +3,13 @@
 
 Storage is SQLite. The database file lives outside the repo (in the
 container, a named volume mounted at /data), so rebuilding the image
-never wipes recipes. On first start, when the recipes table is empty,
-the app seeds itself from data/seed.json.
+never wipes recipes. On every start, the app inserts any recipe from
+data/seed.json whose slug is not already in the database — so a new
+seed recipe reaches an existing database too. It never overwrites
+existing recipes.
+
+In the container, the seed file is at /app/data/seed.json (copied in
+by the Dockerfile). /data holds only the SQLite database, recipes.db.
 
 Routes:
   GET /                     recipe list (HTML), ?q= searches title,
@@ -17,8 +22,7 @@ Routes:
   GET /health               {"status": "ok"}
 
 Recipes added through the form go into the SQLite database (the
-volume), not into data/seed.json — seed.json only fills an empty
-database on first start.
+volume), not into data/seed.json.
 
 Environment:
   RECIPEDB_PATH  SQLite path, default /data/recipes.db
@@ -82,16 +86,25 @@ def connect():
 
 
 def seed(conn):
-    """Seed from seed.json only when the recipes table is empty."""
-    count = conn.execute("SELECT COUNT(*) FROM recipes").fetchone()[0]
-    if count:
-        return 0
+    """Insert seed recipes whose slug is not already in the database.
+
+    Runs on every start, so a new seed recipe reaches an existing
+    database. Existing recipes (including form-added ones) are never
+    touched or duplicated.
+    """
     if not SEED_PATH.exists():
         return 0
     recipes = json.loads(SEED_PATH.read_text(encoding="utf-8"))
     if isinstance(recipes, dict):
         recipes = recipes.get("recipes", [])
+    inserted = 0
     for recipe in recipes:
+        exists = conn.execute(
+            "SELECT 1 FROM recipes WHERE slug = ?", (recipe["slug"],)
+        ).fetchone()
+        if exists:
+            continue
+        inserted += 1
         cur = conn.execute(
             """INSERT INTO recipes
                (slug, title, description, source, submitted_by, prep_time,
@@ -131,7 +144,7 @@ def seed(conn):
                 (recipe_id, i, step),
             )
     conn.commit()
-    return len(recipes)
+    return inserted
 
 
 def init_db():
@@ -541,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     seeded = init_db()
-    print(f"recipeDB: {DB_PATH} (seeded {seeded} recipe(s) on first run)", flush=True)
+    print(f"recipeDB: {DB_PATH} (seeded {seeded} new recipe(s) from seed)", flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"recipeDB: listening on http://localhost:{PORT}", flush=True)
     try:
